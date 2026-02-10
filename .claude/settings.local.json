@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(pip install:*)",
+      "Bash(where:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -c:*)",
+      "Bash(python -m caselens:*)",
+      "Bash(node --version:*)",
+      "Bash(npm:*)",
+      "Bash(npx create-next-app@latest:*)",
+      "Bash(npx next build:*)",
+      "Bash(python -m uvicorn:*)",
+      "Bash(timeout /t 3 /nobreak)",
+      "Bash(curl:*)",
+      "Bash(npx next dev:*)",
+      "Bash(findstr:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:pymupdf.readthedocs.io)"
+    ]
+  }
+}
