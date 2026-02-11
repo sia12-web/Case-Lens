@@ -243,17 +243,9 @@ export default function Home() {
         const formData = new FormData();
         formData.append("file", file);
 
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
-        const apiKey = process.env.NEXT_PUBLIC_API_KEY || "";
-        const headers: HeadersInit = {};
-        if (apiKey) {
-          headers["X-API-Key"] = apiKey;
-        }
-
-        const res = await fetch(`${apiUrl}/api/summarize`, {
+        const res = await fetch("/api/summarize", {
           method: "POST",
           body: formData,
-          headers,
         });
 
         if (intervalRef.current) clearInterval(intervalRef.current);
@@ -347,10 +339,9 @@ export default function Home() {
             w-full max-w-xl border-2 border-dashed rounded-xl p-16
             flex flex-col items-center gap-4 cursor-pointer
             transition-all duration-200
-            ${
-              dragOver
-                ? "border-[var(--gold)] bg-[var(--gold-muted)] scale-[1.01]"
-                : "border-gray-300 hover:border-[var(--gold)] hover:bg-gray-50"
+            ${dragOver
+              ? "border-[var(--gold)] bg-[var(--gold-muted)] scale-[1.01]"
+              : "border-gray-300 hover:border-[var(--gold)] hover:bg-gray-50"
             }
           `}
         >
@@ -411,11 +402,10 @@ export default function Home() {
           {PROCESSING_MESSAGES.map((_, i) => (
             <div
               key={i}
-              className={`w-2.5 h-2.5 rounded-full transition-colors duration-500 ${
-                i <= processingIdx
-                  ? "bg-[var(--gold)]"
-                  : "bg-gray-300"
-              }`}
+              className={`w-2.5 h-2.5 rounded-full transition-colors duration-500 ${i <= processingIdx
+                ? "bg-[var(--gold)]"
+                : "bg-gray-300"
+                }`}
             />
           ))}
         </div>
@@ -489,7 +479,7 @@ export default function Home() {
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               Export Markdown
             </button>
