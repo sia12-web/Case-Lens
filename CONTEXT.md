@@ -24,15 +24,27 @@ Case Lens/
 │   ├── formatter.py         # Terminal and markdown output formatters
 │   ├── api.py               # FastAPI server with auth, rate limiting
 │   ├── rate_limiter.py      # In-memory sliding-window rate limiter
-│   └── ocr.py               # Tesseract OCR via PyMuPDF for scanned PDFs
+│   ├── ocr.py               # Tesseract OCR via PyMuPDF for scanned PDFs
+│   ├── embeddings.py        # Voyage AI / OpenAI embedding generation
+│   ├── database.py          # Supabase client for case storage + vector search
+│   ├── canlii.py            # CanLII API client with rate limiting
+│   ├── ingest.py            # Case ingestion pipeline
+│   ├── scripts/
+│   │   └── run_ingestion.py # CLI entry point for ingestion
+│   └── migrations/
+│       └── 001_init.sql     # pgvector schema, cases table, indexes, RPC
 ├── tests/
 │   ├── __init__.py
-│   ├── test_pdf_processor.py  # 14 unit tests
+│   ├── test_pdf_processor.py  # 22 unit tests
 │   ├── test_summarizer.py     # 13 unit tests
 │   ├── test_cli.py            # 14 unit tests (CLI + formatter)
-│   ├── test_api.py            # 14 unit tests (endpoints + auth)
+│   ├── test_api.py            # 16 unit tests (endpoints + auth)
 │   ├── test_rate_limiter.py   # 7 unit tests
-│   └── test_ocr.py            # 9 unit tests (OCR engine)
+│   ├── test_ocr.py            # 10 unit tests (OCR engine)
+│   ├── test_embeddings.py     # 6 unit tests (embedding engine)
+│   ├── test_database.py       # 9 unit tests (database client)
+│   ├── test_canlii.py         # 9 unit tests (CanLII API client)
+│   └── test_ingest.py         # 6 unit tests (ingestion pipeline)
 ├── frontend/
 │   ├── package.json
 │   ├── tsconfig.json
@@ -537,4 +549,272 @@ Formatter._build_checklist() → ["Verify parties: X (p. 1)", ...]
 python -m pytest tests/ -v
 ```
 
-All 76 tests pass (19 PDF processor + 13 summarizer + 14 CLI + 14 API + 7 rate limiter + 9 OCR).
+All 82 tests pass (22 PDF processor + 13 summarizer + 14 CLI + 16 API + 7 rate limiter + 10 OCR).
+
+---
+
+## Phase 9: Memory Crash Fix + Large PDF Handling
+
+### What Was Built
+- Memory-safe PDF processing with batch extraction (50 pages per batch)
+- PDF validation step: opens PDF, reads page count, closes immediately before full extraction
+- Page limit enforcement: PDFs over 500 pages rejected with `document_too_large` error
+- OCR page limit: maximum 50 pages OCR'd per document, rest use text extraction
+- Upload size limit increased from 20MB to 50MB
+- Explicit resource cleanup: pdfplumber readers closed per batch, `gc.collect()` between batches for large files (100+ pages)
+- 6 new tests across pdf_processor, ocr, and api modules
+
+### Changes to Existing Files
+| File | Changes |
+|------|---------|
+| `caselens/pdf_processor.py` | Added `MAX_PAGES`, `BATCH_SIZE` constants; `validate_pdf()` method; batch extraction in `_extract_with_pdfplumber()`; `gc.collect()` for large files; OCR warning propagation |
+| `caselens/ocr.py` | Added `MAX_OCR_PAGES` constant; `ocr_pages()` returns `(results, skipped)` tuple; per-page image cleanup with `del`; `image.close()` |
+| `caselens/api.py` | `MAX_UPLOAD_BYTES` → 50MB; `MAX_PAGES` and `RESPONSE_TIMEOUT` constants; page-count validation before extraction; version bump to 0.9.0 |
+| `tests/test_pdf_processor.py` | 3 new tests (page limit, batch processing, memory cleanup); updated OCR mocks for new tuple return |
+| `tests/test_ocr.py` | 1 new test (OCR page limit); updated existing tests for new tuple return |
+| `tests/test_api.py` | 2 new tests (page limit 413, 50MB limit); added `_pdf_processor_mock()` helper; existing tests updated for `validate_pdf` |
+
+### Memory Management Strategy
+```
+PDF Upload → Size check (50MB max)
+  ↓
+validate_pdf() → Open, count pages, close immediately
+  ↓
+Page count > 500? → 413 error
+  ↓
+_extract_with_pdfplumber():
+  → Open for page count → close
+  → For each batch of 50 pages:
+      → Open → extract batch → close
+      → gc.collect() if 100+ pages
+  ↓
+OCR (if needed):
+  → Only first 50 sparse pages OCR'd
+  → Per-page: render → OCR → close image → del pixmap
+  → Remaining pages: text extraction only + ocr_warning in metadata
+```
+
+### Error Codes
+| Code | When | HTTP (API) |
+|------|------|------------|
+| `document_too_large` | PDF has >500 pages | 413 |
+| `file_too_large` | Upload exceeds 50MB | 413 |
+
+### Limits
+| Limit | Value |
+|-------|-------|
+| Max upload size | 50 MB |
+| Max page count | 500 pages |
+| Max OCR pages | 50 pages |
+| Batch size (extraction) | 50 pages |
+| GC threshold | 100+ pages |
+
+### How to Run Tests
+```bash
+python -m pytest tests/ -v
+```
+
+All 97 tests pass (22 PDF processor + 13 summarizer + 14 CLI + 16 API + 7 rate limiter + 10 OCR + 6 embeddings + 9 database).
+
+---
+
+## Phase 10: Supabase + pgvector Schema + Embeddings
+
+### What Was Built
+- `EmbeddingEngine` class for generating 1024-dim text embeddings (Voyage AI primary, OpenAI fallback)
+- `CaseDatabase` class wrapping Supabase for case law storage and vector similarity search
+- SQL migration creating `cases` table with pgvector `vector(1024)` column, IVFFlat index, and `match_cases` RPC function
+- Citation graph support via `cited_cases`/`citing_cases` JSONB columns
+- 15 new tests (6 embeddings + 9 database), all mocked
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `caselens/embeddings.py` | `EmbeddingEngine` — Voyage AI (voyage-3) primary, OpenAI (text-embedding-3-small) fallback |
+| `caselens/database.py` | `CaseDatabase` — Supabase client with store, search, retrieve, citation graph |
+| `caselens/migrations/001_init.sql` | pgvector extension, cases table, indexes, match_cases RPC, updated_at trigger |
+| `tests/test_embeddings.py` | 6 unit tests for EmbeddingEngine |
+| `tests/test_database.py` | 9 unit tests for CaseDatabase |
+
+### Tech Decisions
+| Decision | Rationale |
+|----------|-----------|
+| **Voyage AI voyage-3** (primary) | 1024-dim vectors, optimized for semantic search |
+| **OpenAI text-embedding-3-small** (fallback) | Widely available, supports custom dimensions (1024) |
+| **Guarded imports** | `voyageai` and `openai` set to `None` if missing — module loads regardless |
+| **Supabase + pgvector** | Managed Postgres with vector similarity search, free tier available |
+| **IVFFlat index (lists=100)** | Good for scaling; not used under ~1000 rows but ready for growth |
+| **JSONB citation fields** | `cited_cases`/`citing_cases` store CanLII citator graph for "ping pong" feature |
+| **Upsert on canlii_id** | Idempotent ingestion — re-running won't create duplicates |
+| **RPC for similarity search** | `match_cases` function encapsulates vector distance calculation |
+
+### Database Schema
+```sql
+cases (
+    id UUID PRIMARY KEY,
+    canlii_id TEXT UNIQUE NOT NULL,    -- CanLII document identifier
+    database_id TEXT NOT NULL,          -- e.g., "qccs", "qcca"
+    title TEXT NOT NULL,
+    citation TEXT,                      -- e.g., "2024 QCCS 1234"
+    decision_date DATE,
+    court TEXT,
+    jurisdiction TEXT DEFAULT 'qc',
+    language TEXT,
+    keywords TEXT,
+    case_type TEXT,
+    summary TEXT,
+    full_text TEXT,
+    parties JSONB,
+    key_facts JSONB,
+    timeline JSONB,
+    url TEXT,
+    embedding vector(1024),            -- Voyage-3 / OpenAI embedding
+    cited_cases JSONB DEFAULT '[]',    -- cases this decision cites
+    citing_cases JSONB DEFAULT '[]',   -- cases that cite this decision
+    cited_legislation JSONB DEFAULT '[]',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ             -- auto-updated via trigger
+)
+```
+
+### API Usage
+```python
+from caselens.embeddings import EmbeddingEngine
+from caselens.database import CaseDatabase
+
+# Embedding generation
+engine = EmbeddingEngine()  # reads VOYAGE_API_KEY or OPENAI_API_KEY from .env
+vector = engine.generate("custody dispute between parents")
+# -> list of 1024 floats, or {"error": str, "message": str}
+
+vectors = engine.generate_batch(["text 1", "text 2"])
+# -> list of [list of 1024 floats], or {"error": str, "message": str}
+
+# Database operations
+db = CaseDatabase()  # reads SUPABASE_URL and SUPABASE_KEY from .env
+case_id = db.store_case({"canlii_id": "2024qccs1234", "database_id": "qccs", ...})
+case = db.get_case(case_id)
+results = db.search_similar(query_embedding, limit=20)
+citing = db.get_cases_citing(case_id)
+cited = db.get_cases_cited_by(case_id)
+```
+
+### Environment Variables
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SUPABASE_URL` | For database | Supabase project URL |
+| `SUPABASE_KEY` | For database | Supabase service_role key (server-side only) |
+| `VOYAGE_API_KEY` | For embeddings | Voyage AI API key (primary engine) |
+| `OPENAI_API_KEY` | Fallback | OpenAI API key (used if Voyage unavailable) |
+
+### Migration Instructions
+Run `caselens/migrations/001_init.sql` in the Supabase SQL Editor to create the schema.
+
+### How to Run Tests
+```bash
+python -m pytest tests/ -v
+```
+
+All 112 tests pass (22 PDF processor + 13 summarizer + 14 CLI + 16 API + 7 rate limiter + 10 OCR + 6 embeddings + 9 database + 9 CanLII + 6 ingestion).
+
+---
+
+## Phase 11: CanLII Ingestion Pipeline
+
+### What Was Built
+- `CanLIIClient` class for fetching Quebec case law metadata and citator data from the CanLII REST API
+- `CaseIngester` pipeline that fetches cases, generates embeddings, and stores them in Supabase
+- CLI script for running ingestion with date filters and dry-run mode
+- Built-in rate limiting (max 2 req/s) to comply with CanLII API limits
+- Resume support — re-running skips cases already in Supabase by `canlii_id`
+- Auto-pagination for databases with >10,000 cases
+- 15 new tests (9 CanLII client + 6 ingestion pipeline)
+
+### New Files
+| File | Purpose |
+|------|---------|
+| `caselens/canlii.py` | `CanLIIClient` — CanLII API v1 client with rate limiting |
+| `caselens/ingest.py` | `CaseIngester` — end-to-end ingestion pipeline |
+| `caselens/scripts/__init__.py` | Scripts package |
+| `caselens/scripts/run_ingestion.py` | CLI entry point for ingestion |
+| `tests/test_canlii.py` | 9 unit tests for CanLIIClient |
+| `tests/test_ingest.py` | 6 unit tests for CaseIngester |
+
+### Tech Decisions
+| Decision | Rationale |
+|----------|-----------|
+| **httpx** (sync) | Already in requirements; cleaner API than requests; async-ready for later |
+| **0.5s throttle** | CanLII enforces 2 req/s max; built into `_throttle()` method |
+| **Auto-pagination** | `list_all_cases()` loops with 10,000-item pages until exhausted |
+| **Citator failures non-fatal** | Missing citator data → empty list; case still ingested |
+| **Rich embedding text** | Title + keywords + court + date + legislation + cited cases → better semantic search |
+| **canlii_id = `{db}/{case_id}`** | Unique across databases; used for upsert dedup |
+
+### CanLII API Structure
+| Endpoint | Method |
+|----------|--------|
+| `/v1/caseBrowse/en/` | `list_databases()` |
+| `/v1/caseBrowse/en/{db}/` | `list_cases(db, offset, count, date_after, date_before)` |
+| `/v1/caseBrowse/en/{db}/{case}/` | `get_case_metadata(db, case)` |
+| `/v1/caseCitator/en/{db}/{case}/citedCases` | `get_cited_cases(db, case)` |
+| `/v1/caseCitator/en/{db}/{case}/citingCases` | `get_citing_cases(db, case)` |
+| `/v1/caseCitator/en/{db}/{case}/citedLegislations` | `get_cited_legislation(db, case)` |
+
+### Target Quebec Databases
+| Database ID | Court |
+|-------------|-------|
+| `qccs` | Superior Court of Quebec (most family law) |
+| `qcca` | Court of Appeal of Quebec |
+| `qccq` | Court of Quebec |
+
+### Embedding Text Construction
+The embedding text is built from multiple metadata fields for richer semantic search:
+```
+"{title}. Citation: {citation}. Court: {court}. Date: {date}. Keywords: {keywords}.
+Cited legislation: {leg1}, {leg2}. Cited cases: {case1}, {case2}."
+```
+
+### Ingestion CLI Usage
+```bash
+# Dry run — fetch case list and print count only
+python -m caselens.scripts.run_ingestion --database qccs --date-after 2020-01-01 --dry-run
+
+# Ingest all QCCS cases from 2020 onward
+python -m caselens.scripts.run_ingestion --database qccs --date-after 2020-01-01
+
+# Ingest QCCA cases in a date range
+python -m caselens.scripts.run_ingestion --database qcca --date-after 2020-01-01 --date-before 2024-12-31
+
+# Custom batch size for progress logging
+python -m caselens.scripts.run_ingestion --database qccs --date-after 2023-01-01 --batch-size 50
+```
+
+### Ingestion Data Flow
+```
+CLI (run_ingestion.py)
+  → CaseIngester.ingest_database(database_id, date_after, date_before)
+    → CanLIIClient.list_all_cases() — paginated fetch of case list
+    → For each case:
+        → _check_existing(canlii_id) — skip if in Supabase
+        → CanLIIClient.get_case_metadata()
+        → CanLIIClient.get_cited_cases()
+        → CanLIIClient.get_citing_cases()
+        → CanLIIClient.get_cited_legislation()
+        → _build_embedding_text() — combine fields
+        → EmbeddingEngine.generate() — 1024-dim vector
+        → CaseDatabase.store_case() — upsert into Supabase
+    → Return stats: {total, ingested, skipped, errors}
+```
+
+### Environment Variables
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CANLII_API_KEY` | For ingestion | CanLII API key (apply at canlii.org) |
+
+### How to Run Tests
+```bash
+python -m pytest tests/ -v
+```
+
+All 112 tests pass (22 PDF processor + 13 summarizer + 14 CLI + 16 API + 7 rate limiter + 10 OCR + 6 embeddings + 9 database + 9 CanLII + 6 ingestion).

@@ -294,9 +294,10 @@ def test_scanned_pdf_with_ocr_available(mock_exists, mock_pdfplumber, mock_engin
 
     mock_engine = MagicMock()
     mock_engine.check_availability.return_value = (True, "")
-    mock_engine.ocr_pages.return_value = {
-        1: _OCR_TEXT, 2: _OCR_TEXT, 3: _OCR_TEXT, 4: _OCR_TEXT, 5: _OCR_TEXT,
-    }
+    mock_engine.ocr_pages.return_value = (
+        {1: _OCR_TEXT, 2: _OCR_TEXT, 3: _OCR_TEXT, 4: _OCR_TEXT, 5: _OCR_TEXT},
+        [],
+    )
     mock_engine_cls.return_value = mock_engine
 
     result = processor.process("scanned.pdf")
@@ -375,9 +376,10 @@ def test_mixed_pdf_ocr_only_sparse_pages(mock_exists, mock_pdfplumber, mock_engi
 
     mock_engine = MagicMock()
     mock_engine.check_availability.return_value = (True, "")
-    mock_engine.ocr_pages.return_value = {
-        2: _OCR_TEXT, 3: _OCR_TEXT, 4: _OCR_TEXT, 5: _OCR_TEXT,
-    }
+    mock_engine.ocr_pages.return_value = (
+        {2: _OCR_TEXT, 3: _OCR_TEXT, 4: _OCR_TEXT, 5: _OCR_TEXT},
+        [],
+    )
     mock_engine_cls.return_value = mock_engine
 
     result = processor.process("mixed.pdf")
@@ -404,3 +406,70 @@ def test_text_pdf_no_ocr_metadata(mock_exists, mock_pdfplumber, processor):
 
     assert "error" not in result
     assert "ocr_applied" not in result["metadata"]
+
+
+# ------------------------------------------------------------------ #
+# Phase 9: Memory management + large PDF tests
+# ------------------------------------------------------------------ #
+
+
+@patch("os.path.getsize", return_value=1024)
+@patch("caselens.pdf_processor.pdfplumber")
+@patch("os.path.exists", return_value=True)
+def test_pdf_processor_rejects_over_max_pages(mock_exists, mock_pdfplumber, mock_getsize, processor):
+    """PDFs over MAX_PAGES (500) are rejected with document_too_large error."""
+    # Create a mock with 501 pages
+    pages_data = [
+        (i + 1, f"Page {i + 1} content that is long enough to pass the scanned threshold check.", [])
+        for i in range(501)
+    ]
+    mock_pdfplumber.open.return_value = _mock_pdfplumber_pdf(pages_data)
+
+    result = processor.process("huge.pdf")
+
+    assert result["error"] == "document_too_large"
+    assert "501" in result["message"]
+    assert "500" in result["message"]
+
+
+@patch("os.path.getsize", return_value=1024)
+@patch("caselens.pdf_processor.gc")
+@patch("caselens.pdf_processor.pdfplumber")
+@patch("os.path.exists", return_value=True)
+def test_pdf_processor_batch_processing(mock_exists, mock_pdfplumber, mock_gc, mock_getsize, processor):
+    """Large docs (>50 pages) are processed in batches with pdfplumber opened/closed per batch."""
+    # Create 120 pages -> 3 batches: 50 + 50 + 20
+    page_text = "Legal content for batch processing test that is definitely long enough to exceed the threshold."
+    pages_data = [
+        (i + 1, page_text, [])
+        for i in range(120)
+    ]
+    mock_pdfplumber.open.return_value = _mock_pdfplumber_pdf(pages_data)
+
+    result = processor.process("batched.pdf")
+
+    assert "error" not in result
+    assert result["metadata"]["total_pages"] == 120
+
+    # pdfplumber.open called: 1x validate_pdf + 1x page count + 3x batches = 5
+    assert mock_pdfplumber.open.call_count == 5
+
+    # gc.collect() called between batches for >100 page files
+    assert mock_gc.collect.call_count >= 2
+
+
+@patch("os.path.getsize", return_value=1024)
+@patch("caselens.pdf_processor.pdfplumber")
+@patch("os.path.exists", return_value=True)
+def test_memory_cleanup_reader_closed(mock_exists, mock_pdfplumber, mock_getsize, processor):
+    """pdfplumber reader is explicitly closed (via context manager) after processing."""
+    mock_pdf = _mock_pdfplumber_pdf([
+        (1, "Content for testing memory cleanup that exceeds the scanned PDF detection threshold.", []),
+    ])
+    mock_pdfplumber.open.return_value = mock_pdf
+
+    result = processor.process("cleanup.pdf")
+
+    assert "error" not in result
+    # Context manager __exit__ called for each open (validate_pdf + page count + 1 batch = 3)
+    assert mock_pdf.__exit__.call_count == 3

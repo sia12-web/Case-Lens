@@ -1,5 +1,6 @@
 """PDF text extraction, cleaning, and chunking for legal documents."""
 
+import gc
 import os
 import re
 import logging
@@ -30,6 +31,8 @@ class PdfProcessor:
     CHUNK_OVERLAP: int = 500
     SCANNED_MIN_CHARS_PER_PAGE: int = 50
     SCANNED_PAGE_RATIO: float = 0.80
+    MAX_PAGES: int = 500
+    BATCH_SIZE: int = 50
 
     # Text cleaning patterns applied in order: (compiled_regex, replacement)
     CLEANING_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -102,6 +105,21 @@ class PdfProcessor:
         if error:
             return error
 
+        # Quick page-count check before full extraction
+        validation = self.validate_pdf(filepath)
+        if "error" in validation:
+            # Block on encryption; other validation errors → try extraction anyway
+            if validation["error"] == "protected_pdf":
+                return validation
+        elif validation["page_count"] > self.MAX_PAGES:
+            return {
+                "error": "document_too_large",
+                "message": (
+                    f"Document has {validation['page_count']} pages. "
+                    f"Maximum {self.MAX_PAGES} pages allowed."
+                ),
+            }
+
         # Extract
         pages = None
         try:
@@ -157,18 +175,58 @@ class PdfProcessor:
             return {"error": "invalid_format", "message": "File is not a PDF."}
         return None
 
+    def validate_pdf(self, filepath: str) -> dict:
+        """Open PDF, read page count and file size, close immediately.
+
+        Returns:
+            On success: ``{"page_count": int, "file_size_mb": float}``
+            On error: ``{"error": str, "message": str}``
+        """
+        try:
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+            with pdfplumber.open(filepath) as pdf:
+                page_count = len(pdf.pages)
+            return {"page_count": page_count, "file_size_mb": round(file_size_mb, 2)}
+        except Exception as e:
+            if _is_encryption_error(e):
+                return {
+                    "error": "protected_pdf",
+                    "message": "PDF is password-protected and cannot be processed.",
+                }
+            return {
+                "error": "validation_failed",
+                "message": f"Failed to validate PDF: {e}",
+            }
+
     def _extract_with_pdfplumber(self, filepath: str) -> list[dict]:
-        """Primary extraction using pdfplumber."""
-        pages: list[dict] = []
+        """Primary extraction using pdfplumber, processing in batches.
+
+        Opens and closes the reader per batch to limit memory usage.
+        Calls gc.collect() between batches for large files (100+ pages).
+        """
+        # First pass: get total page count
         with pdfplumber.open(filepath) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                has_images = len(page.images) > 0
-                pages.append({
-                    "page_number": page.page_number,
-                    "raw_text": text,
-                    "has_images": has_images,
-                })
+            total_pages = len(pdf.pages)
+
+        pages: list[dict] = []
+        use_gc = total_pages > 100
+
+        for batch_start in range(0, total_pages, self.BATCH_SIZE):
+            batch_end = min(batch_start + self.BATCH_SIZE, total_pages)
+            with pdfplumber.open(filepath) as pdf:
+                for i in range(batch_start, batch_end):
+                    page = pdf.pages[i]
+                    text = page.extract_text() or ""
+                    has_images = len(page.images) > 0
+                    pages.append({
+                        "page_number": page.page_number,
+                        "raw_text": text,
+                        "has_images": has_images,
+                    })
+
+            if use_gc:
+                gc.collect()
+
         return pages
 
     def _extract_with_pypdf(self, filepath: str) -> list[dict]:
@@ -235,7 +293,7 @@ class PdfProcessor:
             return {"ocr_applied": False, "ocr_pages": []}
 
         try:
-            ocr_texts = engine.ocr_pages(filepath, sparse_page_nums)
+            ocr_texts, skipped_pages = engine.ocr_pages(filepath, sparse_page_nums)
         except Exception as e:
             logger.warning("OCR failed: %s", e)
             return {
@@ -253,9 +311,16 @@ class PdfProcessor:
             if page_num in page_map:
                 page_map[page_num]["raw_text"] = text
 
-        logger.info("OCR applied to %d pages: %s", len(sparse_page_nums), sparse_page_nums)
+        ocr_page_nums = list(ocr_texts.keys())
+        logger.info("OCR applied to %d pages: %s", len(ocr_page_nums), ocr_page_nums)
 
-        return {"ocr_applied": True, "ocr_pages": sparse_page_nums}
+        result: dict = {"ocr_applied": True, "ocr_pages": ocr_page_nums}
+        if skipped_pages:
+            result["ocr_warning"] = (
+                f"Only first {engine.MAX_OCR_PAGES} pages OCR'd. "
+                f"Remaining {len(skipped_pages)} pages skipped."
+            )
+        return result
 
     def _clean_text(self, text: str) -> str:
         """Apply the cleaning pipeline to a single page's text."""
@@ -378,6 +443,8 @@ class PdfProcessor:
         if ocr_info and ocr_info.get("ocr_applied"):
             metadata["ocr_applied"] = True
             metadata["ocr_pages"] = ocr_info.get("ocr_pages", [])
+            if ocr_info.get("ocr_warning"):
+                metadata["ocr_warning"] = ocr_info["ocr_warning"]
 
         return {
             "pages": [

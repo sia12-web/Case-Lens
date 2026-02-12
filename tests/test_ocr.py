@@ -97,9 +97,10 @@ def test_ocr_pages_extracts_text(mock_fitz, mock_image, mock_tess):
     mock_tess.image_to_string.return_value = "  OCR extracted legal text from the scanned document  "
 
     engine = OcrEngine()
-    result = engine.ocr_pages("test.pdf", [1])
+    results, skipped = engine.ocr_pages("test.pdf", [1])
 
-    assert result == {1: "OCR extracted legal text from the scanned document"}
+    assert results == {1: "OCR extracted legal text from the scanned document"}
+    assert skipped == []
     mock_fitz.open.assert_called_once_with("test.pdf")
     mock_doc.__getitem__.assert_called_once_with(0)  # 1-based → 0-based
     mock_doc.close.assert_called_once()
@@ -131,10 +132,11 @@ def test_ocr_pages_multiple_pages(mock_fitz, mock_image, mock_tess):
     mock_tess.image_to_string.side_effect = side_effect
 
     engine = OcrEngine()
-    result = engine.ocr_pages("multi.pdf", [1, 3, 5])
+    results, skipped = engine.ocr_pages("multi.pdf", [1, 3, 5])
 
-    assert len(result) == 3
-    assert 1 in result and 3 in result and 5 in result
+    assert len(results) == 3
+    assert 1 in results and 3 in results and 5 in results
+    assert skipped == []
     # Verify 0-based page indices: pages 1,3,5 → indices 0,2,4
     calls = mock_doc.__getitem__.call_args_list
     assert calls == [call(0), call(2), call(4)]
@@ -186,3 +188,37 @@ def test_ocr_engine_custom_dpi_and_language(mock_fitz, mock_image, mock_tess):
     mock_tess.image_to_string.assert_called_once()
     _, kwargs = mock_tess.image_to_string.call_args
     assert kwargs["lang"] == "fra"
+
+
+# ------------------------------------------------------------------
+# Phase 9: OCR page limit tests
+# ------------------------------------------------------------------
+
+
+@patch("caselens.ocr.pytesseract")
+@patch("caselens.ocr.Image")
+@patch("caselens.ocr.fitz")
+def test_ocr_page_limit(mock_fitz, mock_image, mock_tess):
+    """OCR stops at MAX_OCR_PAGES (50) and returns skipped pages."""
+    mock_pixmap = MagicMock()
+    mock_pixmap.tobytes.return_value = b"fake-png"
+
+    mock_page = MagicMock()
+    mock_page.get_pixmap.return_value = mock_pixmap
+
+    mock_doc = MagicMock()
+    mock_doc.__getitem__ = MagicMock(return_value=mock_page)
+    mock_fitz.open.return_value = mock_doc
+
+    mock_image.open.return_value = MagicMock()
+    mock_tess.image_to_string.return_value = "OCR text"
+
+    engine = OcrEngine()
+    # Request OCR on 60 pages — only first 50 should be processed
+    all_pages = list(range(1, 61))
+    results, skipped = engine.ocr_pages("large.pdf", all_pages)
+
+    assert len(results) == 50
+    assert skipped == list(range(51, 61))
+    # Only 50 OCR calls should have been made
+    assert mock_tess.image_to_string.call_count == 50

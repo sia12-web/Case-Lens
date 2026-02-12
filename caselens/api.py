@@ -16,7 +16,9 @@ from caselens.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_PAGES = 500
+RESPONSE_TIMEOUT = 120  # seconds
 
 # ------------------------------------------------------------------
 # Configuration from environment
@@ -93,7 +95,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app = FastAPI(
     title="Case Lens API",
     description="Legal PDF analysis and summarization powered by Claude.",
-    version="0.6.0",
+    version="0.9.0",
 )
 
 # Relaxed CORS for production deployment
@@ -159,8 +161,22 @@ async def summarize(
             tmp.write(contents)
             tmp_path = tmp.name
 
-        # Extract (run in thread to avoid blocking the event loop)
+        # Quick page-count validation before full extraction
         processor = PdfProcessor()
+        validation = await asyncio.to_thread(processor.validate_pdf, tmp_path)
+        if "error" not in validation and validation["page_count"] > MAX_PAGES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "document_too_large",
+                    "message": (
+                        f"Document has {validation['page_count']} pages. "
+                        f"Maximum {MAX_PAGES} pages allowed."
+                    ),
+                },
+            )
+
+        # Extract (run in thread to avoid blocking the event loop)
         extraction = await asyncio.to_thread(processor.process, tmp_path)
 
         if "error" in extraction:

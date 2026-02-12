@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.11.0] - 2026-02-12
+
+### Phase 11: CanLII Ingestion Pipeline
+
+#### Added
+- `CanLIIClient` class in `caselens/canlii.py` — fetches case metadata and citator data from CanLII REST API v1
+- `CaseIngester` class in `caselens/ingest.py` — end-to-end pipeline: fetch → embed → store
+- `caselens/scripts/run_ingestion.py` — CLI entry point with `--database`, `--date-after`, `--date-before`, `--dry-run` flags
+- Built-in rate limiting (0.5s between requests, max 2 req/s per CanLII policy)
+- Auto-pagination for databases with >10,000 cases
+- Resume support: re-running skips cases already in Supabase by `canlii_id`
+- Rich embedding text: title + keywords + court + date + legislation + cited cases
+- 15 new tests (9 CanLII client + 6 ingestion pipeline)
+
+#### Test Count
+- 112 tests total (97 existing + 15 new)
+
+---
+
+## [0.10.0] - 2026-02-12
+
+### Phase 10: Supabase + pgvector Schema + Embeddings
+
+#### Added
+- `EmbeddingEngine` class in `caselens/embeddings.py` — Voyage AI (voyage-3) primary, OpenAI (text-embedding-3-small) fallback
+- `CaseDatabase` class in `caselens/database.py` — Supabase client with store, search, retrieve, citation graph
+- SQL migration `caselens/migrations/001_init.sql` — pgvector, cases table, IVFFlat index, match_cases RPC
+- Citation graph: `cited_cases`/`citing_cases` JSONB columns for CanLII citator data
+- 15 new tests (6 embeddings + 9 database)
+
+#### Test Count
+- 97 tests total (82 existing + 15 new)
+
+---
+
+## [0.9.0] - 2026-02-12
+
+### Phase 9: Memory Crash Fix + Large PDF Handling
+
+#### Added
+- Memory-safe batch extraction (50 pages per batch with reader close between batches)
+- PDF validation step: page count check before full extraction
+- Page limit: PDFs over 500 pages rejected with `document_too_large` error
+- OCR page limit: max 50 pages OCR'd per document
+- Upload size limit increased from 20MB to 50MB
+- `gc.collect()` between batches for large files (100+ pages)
+- 6 new tests across pdf_processor, ocr, and api
+
+#### Test Count
+- 82 tests total (76 existing + 6 new)
+
+---
+
 ## [0.8.0] - 2026-02-10
 
 ### Phase 8: Page Citations + Verification

@@ -39,6 +39,7 @@ class OcrEngine:
 
     DEFAULT_DPI: int = 300
     DEFAULT_LANGUAGE: str = "eng"
+    MAX_OCR_PAGES: int = 50
 
     def __init__(self, *, dpi: int = DEFAULT_DPI, language: str = DEFAULT_LANGUAGE):
         self.dpi = dpi
@@ -77,28 +78,47 @@ class OcrEngine:
                 )
         return True, ""
 
-    def ocr_pages(self, filepath: str, page_numbers: list[int]) -> dict[int, str]:
+    def ocr_pages(
+        self, filepath: str, page_numbers: list[int]
+    ) -> tuple[dict[int, str], list[int]]:
         """OCR specified pages and return extracted text.
+
+        Only the first ``MAX_OCR_PAGES`` pages are OCR'd. Remaining pages
+        are returned in a *skipped* list so the caller can handle them.
 
         Args:
             filepath: Path to the PDF file.
             page_numbers: 1-based page numbers to OCR.
 
         Returns:
-            Mapping of page_number to extracted text string.
+            ``(results, skipped)`` — *results* maps page_number → text,
+            *skipped* lists page numbers that exceeded the OCR limit.
         """
+        to_ocr = page_numbers[: self.MAX_OCR_PAGES]
+        skipped = page_numbers[self.MAX_OCR_PAGES :]
+
+        if skipped:
+            logger.info(
+                "OCR page limit (%d) reached — skipping pages: %s",
+                self.MAX_OCR_PAGES,
+                skipped,
+            )
+
         results: dict[int, str] = {}
         doc = fitz.open(filepath)
         try:
-            for page_num in page_numbers:
+            for page_num in to_ocr:
                 page = doc[page_num - 1]  # fitz is 0-based
                 zoom = self.dpi / 72  # PDF default is 72 DPI
                 matrix = fitz.Matrix(zoom, zoom)
                 pixmap = page.get_pixmap(matrix=matrix)
                 img_bytes = pixmap.tobytes("png")
+                # Open image, OCR, then discard immediately
                 image = Image.open(io.BytesIO(img_bytes))
                 text = pytesseract.image_to_string(image, lang=self.language)
+                image.close()
                 results[page_num] = text.strip()
+                del pixmap, img_bytes, image
                 logger.debug(
                     "OCR page %d: %d chars extracted",
                     page_num,
@@ -106,4 +126,4 @@ class OcrEngine:
                 )
         finally:
             doc.close()
-        return results
+        return results, skipped

@@ -44,6 +44,18 @@ def _pdf_bytes() -> bytes:
     return b"%PDF-1.4 fake content for testing purposes"
 
 
+VALID_VALIDATION = {"page_count": 1, "file_size_mb": 0.01}
+
+
+def _pdf_processor_mock(process_return=None, validate_return=None):
+    """Build a mock PdfProcessor with validate_pdf and process configured."""
+    mock = MagicMock()
+    mock.validate_pdf.return_value = validate_return or VALID_VALIDATION
+    if process_return is not None:
+        mock.process.return_value = process_return
+    return mock
+
+
 def _auth_headers(key: str = TEST_API_KEY) -> dict:
     """Build headers with X-API-Key."""
     return {"X-API-Key": key}
@@ -64,9 +76,7 @@ def test_api_health():
 @patch("caselens.api.PdfProcessor")
 def test_api_summarize_valid_pdf(mock_processor_cls, mock_summarizer_cls):
     """Upload mock PDF, verify response structure."""
-    mock_processor = MagicMock()
-    mock_processor.process.return_value = VALID_EXTRACTION
-    mock_processor_cls.return_value = mock_processor
+    mock_processor_cls.return_value = _pdf_processor_mock(process_return=VALID_EXTRACTION)
 
     mock_summarizer = MagicMock()
     mock_summarizer.summarize.return_value = VALID_SUMMARY.copy()
@@ -125,13 +135,11 @@ def test_api_temp_file_cleanup(mock_processor_cls, mock_summarizer_cls):
     """Verify temp files are deleted after processing."""
     captured_paths = []
 
-    original_process = MagicMock(return_value=VALID_EXTRACTION)
-
     def tracking_process(filepath):
         captured_paths.append(filepath)
         return VALID_EXTRACTION
 
-    mock_processor = MagicMock()
+    mock_processor = _pdf_processor_mock()
     mock_processor.process.side_effect = tracking_process
     mock_processor_cls.return_value = mock_processor
 
@@ -155,12 +163,9 @@ def test_api_temp_file_cleanup(mock_processor_cls, mock_summarizer_cls):
 @patch("caselens.api.PdfProcessor")
 def test_api_extraction_error(mock_processor_cls, mock_summarizer_cls):
     """Verify extraction error returns 422."""
-    mock_processor = MagicMock()
-    mock_processor.process.return_value = {
-        "error": "scanned_pdf",
-        "message": "PDF appears to be scanned.",
-    }
-    mock_processor_cls.return_value = mock_processor
+    mock_processor_cls.return_value = _pdf_processor_mock(
+        process_return={"error": "scanned_pdf", "message": "PDF appears to be scanned."},
+    )
 
     response = client.post(
         "/api/summarize",
@@ -177,9 +182,7 @@ def test_api_extraction_error(mock_processor_cls, mock_summarizer_cls):
 @patch("caselens.api.PdfProcessor")
 def test_api_summarizer_error(mock_processor_cls, mock_summarizer_cls):
     """Verify summarizer error returns 502."""
-    mock_processor = MagicMock()
-    mock_processor.process.return_value = VALID_EXTRACTION
-    mock_processor_cls.return_value = mock_processor
+    mock_processor_cls.return_value = _pdf_processor_mock(process_return=VALID_EXTRACTION)
 
     mock_summarizer = MagicMock()
     mock_summarizer.summarize.return_value = {
@@ -209,7 +212,7 @@ def test_api_temp_cleanup_on_error(mock_processor_cls, mock_summarizer_cls):
         captured_paths.append(filepath)
         raise RuntimeError("Unexpected failure")
 
-    mock_processor = MagicMock()
+    mock_processor = _pdf_processor_mock()
     mock_processor.process.side_effect = exploding_process
     mock_processor_cls.return_value = mock_processor
 
@@ -265,9 +268,7 @@ def test_api_summarize_invalid_auth():
 @patch("caselens.api.PdfProcessor")
 def test_api_summarize_valid_auth(mock_processor_cls, mock_summarizer_cls):
     """POST /api/summarize with valid API key returns 200."""
-    mock_processor = MagicMock()
-    mock_processor.process.return_value = VALID_EXTRACTION
-    mock_processor_cls.return_value = mock_processor
+    mock_processor_cls.return_value = _pdf_processor_mock(process_return=VALID_EXTRACTION)
 
     mock_summarizer = MagicMock()
     mock_summarizer.summarize.return_value = VALID_SUMMARY.copy()
@@ -307,3 +308,41 @@ def test_api_health_no_auth():
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+# -- Phase 9: Large PDF handling tests ------------------------------------- #
+
+@patch("caselens.api.CASELENS_API_KEY", None)
+@patch("caselens.api.PdfProcessor")
+def test_api_large_pdf_page_limit(mock_processor_cls):
+    """Upload a PDF with >500 pages returns 413."""
+    mock_processor = MagicMock()
+    mock_processor.validate_pdf.return_value = {"page_count": 501, "file_size_mb": 10.0}
+    mock_processor_cls.return_value = mock_processor
+
+    response = client.post(
+        "/api/summarize",
+        files={"file": ("huge.pdf", io.BytesIO(_pdf_bytes()), "application/pdf")},
+    )
+
+    assert response.status_code == 413
+    data = response.json()
+    assert data["error"] == "document_too_large"
+    assert "501" in data["message"]
+    assert "500" in data["message"]
+
+
+@patch("caselens.api.CASELENS_API_KEY", None)
+def test_api_upload_50mb_limit():
+    """Verify 413 error for files exceeding 50MB limit."""
+    oversized = b"x" * (MAX_UPLOAD_BYTES + 1)
+
+    response = client.post(
+        "/api/summarize",
+        files={"file": ("big.pdf", io.BytesIO(oversized), "application/pdf")},
+    )
+
+    assert response.status_code == 413
+    data = response.json()
+    assert data["detail"]["error"] == "file_too_large"
+    assert "50MB" in data["detail"]["message"]
