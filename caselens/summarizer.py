@@ -10,7 +10,7 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 # The model used for summarization — Sonnet 3.5 balances quality and cost.
-DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOKENS = 8192  # Increased to prevent truncation of large summaries
 
