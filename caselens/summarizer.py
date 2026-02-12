@@ -9,10 +9,10 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-# The model used for summarization — Sonnet 4.5 balances quality and cost.
-DEFAULT_MODEL = "claude-opus-4-6"
+# The model used for summarization — Sonnet 3.5 balances quality and cost.
+DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
 DEFAULT_TEMPERATURE = 0.1
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 8192  # Increased to prevent truncation of large summaries
 
 SYSTEM_PROMPT = """\
 You are a legal document analyst specializing in Quebec family law.
@@ -283,13 +283,29 @@ class Summarizer:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
 
+        # Find the first '{' and last '}' to extract the JSON object
+        # This handles cases where the model adds commentary or markdown fences
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx:end_idx + 1]
+        elif start_idx != -1:
+            # If we found { but no }, it's likely truncated
+            cleaned = cleaned[start_idx:]
+        
+        cleaned = cleaned.strip()
+
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON. Text length: {len(text)}. Error: {e}")
+            logger.error(f"Response starts with: {text[:100]!r}")
+            logger.error(f"Response ends with: {text[-100:]!r}")
             return {
                 "error": "malformed_response",
                 "message": f"Failed to parse API response as JSON: {e}",
-                "raw_response": text[:500],
+                "raw_response": text[:1000],  # Increased to help debug
             }
 
         # Validate required fields
