@@ -190,6 +190,9 @@ async def summarize(
         summary = await asyncio.to_thread(summarizer.summarize, extraction)
 
         if "error" in summary:
+            print(f"DEBUG: Summarization error: {summary.get('error')} - {summary.get('message')}")
+            if "raw_response" in summary:
+                print(f"DEBUG: Raw response (truncated): {summary.get('raw_response')[:500]}")
             return JSONResponse(
                 status_code=502,
                 content={"error": summary["error"], "message": summary["message"]},
